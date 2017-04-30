@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*- 
 from __future__ import absolute_import, unicode_literals
 __version__ = '0.38'
 __license__ = 'MIT'
@@ -57,8 +58,11 @@ class Tokenizer(object):
             self.dictionary = dictionary
         else:
             self.dictionary = _get_abs_path(dictionary)
+        #存储dict.txt中的中文单词和 对应的频率,以及单词的前缀，比如 去化，
+        #则去字也会存在freq中, 但是value为0
         self.FREQ = {}
         self.total = 0
+        # word 与tag 的对应关系
         self.user_word_tag_tab = {}
         self.initialized = False
         self.tmp_dir = None
@@ -168,6 +172,11 @@ class Tokenizer(object):
             self.initialize()
 
     def calc(self, sentence, DAG, route):
+        """
+            根据DAG的位置信息，计算每个起始字开始的词的最大词频值, 比如 谢谢你，以0号为开头的最大的词频值
+            采用了动态规划查找最大概率路径, 找出基于词频的最大熵切分组合
+            目的在于筛选的组合最多，也就是信息熵最大
+        """
         N = len(sentence)
         route[N] = (0, 0)
         logtotal = log(self.total)
@@ -176,6 +185,17 @@ class Tokenizer(object):
                               logtotal + route[x + 1][0], x) for x in DAG[idx])
 
     def get_DAG(self, sentence):
+        """
+
+            从语句之中，根据FREQ 词典里面的数据，返回目前的词语列表，比如穆赫兰道，会被分为 穆，赫，兰，道
+            因为没有两个可以构成词，但是比如爸爸妈妈， 则会返回 0 : 爸爸妈妈，爸爸，1: 爸妈，2: 爸妈 的结构
+            前面下标代表起始词的位置，后面的返回的是最后一个词的下标，表示这两个下标构成了一个词
+
+            注意这类的sentence 已经是过滤了各种 换行和标点的
+
+            Parameter
+                - @sentence   example "建议关注轨交板块的优质企业以及具有进口替代和后市场概念的相关标的"
+        """
         self.check_initialized()
         DAG = {}
         N = len(sentence)
@@ -184,12 +204,15 @@ class Tokenizer(object):
             i = k
             frag = sentence[k]
             while i < N and frag in self.FREQ:
+                #FREQ > 0的时候，是有词频的，也就是词典中的词,添加到tmpList中,作为分词结果的预处理数据
                 if self.FREQ[frag]:
                     tmplist.append(i)
                 i += 1
                 frag = sentence[k:i + 1]
             if not tmplist:
+                #如果没有构成一个词， 则单个字也是需要返回的
                 tmplist.append(k)
+            print tmplist, frag
             DAG[k] = tmplist
         return DAG
 
@@ -207,6 +230,7 @@ class Tokenizer(object):
                         old_j = j
 
     def __cut_DAG_NO_HMM(self, sentence):
+        #与词典的数据相匹配，得到其词语的位置
         DAG = self.get_DAG(sentence)
         route = {}
         self.calc(sentence, DAG, route)
@@ -240,18 +264,23 @@ class Tokenizer(object):
             y = route[x][1] + 1
             l_word = sentence[x:y]
             if y - x == 1:
+                #如果这个词是单个字，考虑和之前的之前的单个字的合并，
+                #或者和之后的单个字的合并
                 buf += l_word
             else:
                 if buf:
                     if len(buf) == 1:
+                        #新的汉字构成了一个词，所以之前的buf，需要字需要先输出构成单字分词
                         yield buf
                         buf = ''
                     else:
+                        #如果buf是多个，并且不是一个字，语法分析，判断buf需要成为几个
                         if not self.FREQ.get(buf):
                             recognized = finalseg.cut(buf)
                             for t in recognized:
                                 yield t
                         else:
+                            #如果在词典里面，证明不是一个新词，按汉字 不是词
                             for elem in buf:
                                 yield elem
                         buf = ''
@@ -274,33 +303,49 @@ class Tokenizer(object):
         The main function that segments an entire sentence that contains
         Chinese characters into seperated words.
 
+        中文切词的入口函数
+
         Parameter:
             - sentence: The str(unicode) to be segmented.
             - cut_all: Model type. True for full pattern, False for accurate pattern.
             - HMM: Whether to use the Hidden Markov Model.
+
+            - sentence: 需要被切分的字符串，
+            - cut_all: 是否是全模式，比如 清华北大，是切分成 清华北大，还是切分成：清华，北大，清华北大
+            - HMM: 是否使用 隐马尔科夫 模型, 默认 为使用
         '''
         sentence = strdecode(sentence)
-
+        
+        # 根据参数确定要使用的方法，re_han_cut_all, re_han_default 都是正则匹配方法
+        # re_han 目的是为了从文章之中 提取文字语句，比如“你好，江太太”,就必须切分为：你好 和 江太太 
+        # 两个字符串 然后具体再处理
         if cut_all:
             re_han = re_han_cut_all
             re_skip = re_skip_cut_all
         else:
             re_han = re_han_default
             re_skip = re_skip_default
+
+        # 全模式，还是 隐马，或者是 非隐马模式
         if cut_all:
             cut_block = self.__cut_all
         elif HMM:
             cut_block = self.__cut_DAG
         else:
             cut_block = self.__cut_DAG_NO_HMM
+
+        # blocks 将文章切成 碎片 的结果数组中间包含了各种换行和空格等分割的字符
         blocks = re_han.split(sentence)
         for blk in blocks:
             if not blk:
                 continue
+            #如果是正常的汉字或者字母，则开始切词
             if re_han.match(blk):
+                #cut_block  是__cut_DAG_NO_HMM 还是 __cut_DAG 有可能是__cut_all
                 for word in cut_block(blk):
                     yield word
             else:
+                #re_skip 需要跳过的字符， 以下返回的内容没有什么价值
                 tmp = re_skip.split(blk)
                 for x in tmp:
                     if re_skip.match(x):
@@ -384,6 +429,7 @@ class Tokenizer(object):
             if not line:
                 continue
             # match won't be None because there's at least one character
+            # 将 '去化 3189 j' 切成 word, freq和tag三份
             word, freq, tag = re_userdict.match(line).groups()
             if freq is not None:
                 freq = freq.strip()
@@ -393,6 +439,8 @@ class Tokenizer(object):
 
     def add_word(self, word, freq=None, tag=None):
         """
+        添加单词到word 中，FREQ里面 
+
         Add a word to dictionary.
 
         freq and tag can be omitted, freq defaults to be a calculated value
@@ -440,6 +488,7 @@ class Tokenizer(object):
         else:
             segment = tuple(map(strdecode, segment))
             word = ''.join(segment)
+            #两个频率相乘 减小词频
             for seg in segment:
                 freq *= self.FREQ.get(seg, 1) / ftotal
             freq = min(int(freq * self.total), self.FREQ.get(word, 0))
